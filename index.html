@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#16181d">
+<title>Web MIDI Controller</title>
+<style>
+  :root {
+    --bg: #16181d;
+    --panel: #20232a;
+    --border: #333844;
+    --text: #e6e8ee;
+    --muted: #9aa1b1;
+    --accent: #4fa3ff;
+    --remote: #ffb347;
+    --white: #f4f4f2;
+    --white-down: #9ccbff;
+    --black: #1b1b1f;
+    --black-down: #2f7fd6;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  header {
+    padding: 10px 16px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 18px;
+    align-items: center;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  h1 { font-size: 16px; margin: 0 8px 0 0; font-weight: 600; }
+  label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  select, button, input[type=number] {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font: inherit;
+  }
+  select { max-width: 220px; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button:active { background: var(--border); }
+  .group { display: flex; align-items: center; gap: 6px; }
+  #octLabel { min-width: 74px; text-align: center; font-variant-numeric: tabular-nums; }
+  .led {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: #3a3f4b; display: inline-block; transition: background .15s;
+  }
+  .led.on { background: var(--accent); transition: none; }
+  .led.in.on { background: var(--remote); }
+  #status { color: var(--muted); padding: 8px 16px; min-height: 2.2em; }
+  #status.err { color: #ff7a7a; }
+
+  main {
+    flex: 1;
+    display: flex;
+    align-items: stretch;
+    justify-content: center;
+    padding: 12px 16px 16px;
+    min-height: 0;
+  }
+  #keyboard {
+    position: relative;
+    display: flex;
+    width: 100%;
+    max-width: 1200px;
+    height: 100%;
+    max-height: 360px;
+    min-height: 160px;
+    touch-action: none;
+  }
+  .key { position: relative; border-radius: 0 0 6px 6px; }
+  .white {
+    flex: 1;
+    background: var(--white);
+    border: 1px solid #888;
+    margin: 0 1px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding-bottom: 8px;
+    color: #777;
+    font-size: 11px;
+  }
+  .black {
+    position: absolute;
+    top: 0;
+    height: 60%;
+    background: var(--black);
+    border: 1px solid #000;
+    z-index: 2;
+    color: #888;
+    font-size: 10px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding-bottom: 6px;
+  }
+  .white.down { background: var(--white-down); }
+  .black.down { background: var(--black-down); }
+  .white.remote { background: #ffd9a3; }
+  .black.remote { background: #c77a1e; }
+  .key .hint { pointer-events: none; opacity: .7; text-transform: uppercase; }
+  @media (max-width: 600px), (pointer: coarse) {
+    .key .hint { display: none; }
+  }
+  footer { color: var(--muted); font-size: 12px; padding: 0 16px 12px; text-align: center; }
+  kbd {
+    border: 1px solid var(--border); border-radius: 3px; padding: 0 4px;
+    font-family: inherit; background: var(--panel);
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>MIDI Controller</h1>
+
+  <label>Out <span class="led" id="outLed"></span>
+    <select id="outSel"><option value="">— none —</option></select>
+  </label>
+
+  <label>In <span class="led in" id="inLed"></span>
+    <select id="inSel"><option value="">— none —</option></select>
+  </label>
+
+  <label><input type="checkbox" id="thru" checked> Thru</label>
+
+  <label>Ch
+    <select id="chSel"></select>
+  </label>
+
+  <label>Vel
+    <input type="range" id="vel" min="1" max="127" value="100">
+    <span id="velVal">100</span>
+  </label>
+
+  <div class="group">
+    <button id="octDown" title="Octave down (←)">− Oct</button>
+    <span id="octLabel"></span>
+    <button id="octUp" title="Octave up (→)">Oct +</button>
+  </div>
+
+  <button id="panic" title="All notes off">Panic</button>
+</header>
+
+<div id="status">Requesting MIDI access…</div>
+
+<main><div id="keyboard"></div></main>
+
+<footer>
+  Computer keys: <kbd>Z</kbd>–<kbd>M</kbd> lower octave, <kbd>Q</kbd>–<kbd>U</kbd> upper octave,
+  <kbd>←</kbd>/<kbd>→</kbd> change octave. Requires a browser with Web MIDI (Chrome, Edge, Opera, Firefox).
+</footer>
+
+<script>
+(() => {
+  "use strict";
+
+  const NUM_KEYS = 24;
+  const MIN_OCT = -1, MAX_OCT = 7;              // keeps all 24 notes within 0..127
+  const NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+  const IS_BLACK = [0,1,0,1,0,0,1,0,1,0,1,0];
+  // Computer keyboard → key index (two rows per octave, tracker-style)
+  const KEYMAP = {
+    KeyZ:0, KeyS:1, KeyX:2, KeyD:3, KeyC:4, KeyV:5, KeyG:6, KeyB:7, KeyH:8, KeyN:9, KeyJ:10, KeyM:11,
+    KeyQ:12, Digit2:13, KeyW:14, Digit3:15, KeyE:16, KeyR:17, Digit5:18, KeyT:19, Digit6:20, KeyY:21, Digit7:22, KeyU:23
+  };
+  const HINTS = {};
+  for (const [code, i] of Object.entries(KEYMAP)) HINTS[i] = code.replace(/^(Key|Digit)/, "");
+
+  const $ = id => document.getElementById(id);
+  const outSel = $("outSel"), inSel = $("inSel"), chSel = $("chSel");
+  const velEl = $("vel"), velVal = $("velVal"), thruEl = $("thru");
+  const statusEl = $("status"), kb = $("keyboard");
+
+  let midi = null, output = null, input = null;
+  let octave = 4;                     // C4 = 60
+  const keyEls = [];
+  const held = new Map();             // source id -> MIDI note actually sent
+  const noteRefs = new Array(128).fill(0);
+  const pointerKey = new Map();       // pointerId -> key index
+  const remoteNotes = new Set();
+
+  // ---------- Settings persistence ----------
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem("wmc." + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+    set(k, v) { try { localStorage.setItem("wmc." + k, JSON.stringify(v)); } catch {} }
+  };
+  octave = Math.min(MAX_OCT, Math.max(MIN_OCT, store.get("octave", 4)));
+  velEl.value = store.get("vel", 100);
+  thruEl.checked = store.get("thru", true);
+
+  for (let c = 1; c <= 16; c++) chSel.add(new Option(c, c - 1));
+  chSel.value = store.get("ch", 0);
+
+  // ---------- Build keyboard ----------
+  const whiteCount = [...Array(NUM_KEYS).keys()].filter(i => !IS_BLACK[i % 12]).length;
+  let whiteIdx = 0;
+  for (let i = 0; i < NUM_KEYS; i++) {
+    const el = document.createElement("div");
+    const black = IS_BLACK[i % 12];
+    el.className = "key " + (black ? "black" : "white");
+    el.dataset.idx = i;
+    el.innerHTML = `<span class="hint">${HINTS[i] || ""}</span>`;
+    if (black) {
+      const w = 100 / whiteCount;
+      el.style.left = `calc(${whiteIdx * w}% - ${w * 0.3}%)`;
+      el.style.width = `${w * 0.6}%`;
+    } else {
+      whiteIdx++;
+    }
+    kb.appendChild(el);
+    keyEls.push(el);
+  }
+
+  // ---------- MIDI out ----------
+  let ledTimer = {};
+  function blink(id) {
+    const led = $(id);
+    led.classList.add("on");
+    clearTimeout(ledTimer[id]);
+    ledTimer[id] = setTimeout(() => led.classList.remove("on"), 60);
+  }
+
+  function send(bytes) {
+    if (!output) return;
+    try { output.send(bytes); blink("outLed"); }
+    catch (e) { setStatus("Send failed: " + e.message, true); }
+  }
+  const channel = () => +chSel.value;
+
+  function noteOn(note) {
+    if (noteRefs[note]++ === 0) send([0x90 | channel(), note, +velEl.value]);
+  }
+  function noteOff(note) {
+    if (noteRefs[note] === 0) return;
+    if (--noteRefs[note] === 0) send([0x80 | channel(), note, 0]);
+  }
+
+  function keyDown(src, idx) {
+    if (held.has(src)) return;
+    const note = 12 * (octave + 1) + idx;
+    held.set(src, note);
+    noteOn(note);
+    refreshKeys();
+  }
+  function keyUp(src) {
+    if (!held.has(src)) return;
+    noteOff(held.get(src));
+    held.delete(src);
+    refreshKeys();
+  }
+
+  function panic() {
+    for (const src of [...held.keys()]) keyUp(src);
+    pointerKey.clear();
+    noteRefs.fill(0);
+    remoteNotes.clear();
+    if (output) {
+      for (let ch = 0; ch < 16; ch++) {
+        send([0xB0 | ch, 64, 0]);   // sustain off
+        send([0xB0 | ch, 123, 0]);  // all notes off
+        send([0xB0 | ch, 120, 0]);  // all sound off
+      }
+    }
+    refreshKeys();
+  }
+
+  // ---------- Visual state ----------
+  function refreshKeys() {
+    const base = 12 * (octave + 1);
+    for (let i = 0; i < NUM_KEYS; i++) {
+      const n = base + i;
+      keyEls[i].classList.toggle("down", noteRefs[n] > 0);
+      keyEls[i].classList.toggle("remote", remoteNotes.has(n) && noteRefs[n] === 0);
+    }
+  }
+
+  function setOctave(o) {
+    octave = Math.min(MAX_OCT, Math.max(MIN_OCT, o));
+    store.set("octave", octave);
+    const lo = 12 * (octave + 1);
+    $("octLabel").textContent = `C${octave}–B${octave + 1}`;
+    $("octLabel").title = `MIDI notes ${lo}–${lo + 23}`;
+    refreshKeys();
+  }
+
+  // ---------- Pointer input (mouse / touch / pen, multi-touch + glide) ----------
+  function keyAt(x, y) {
+    const el = document.elementFromPoint(x, y);
+    const k = el && el.closest && el.closest(".key");
+    return k ? +k.dataset.idx : null;
+  }
+  kb.addEventListener("pointerdown", e => {
+    e.preventDefault();
+    const idx = keyAt(e.clientX, e.clientY);
+    if (idx === null) return;
+    pointerKey.set(e.pointerId, idx);
+    keyDown("p" + e.pointerId, idx);
+  });
+  window.addEventListener("pointermove", e => {
+    if (!pointerKey.has(e.pointerId)) return;
+    const idx = keyAt(e.clientX, e.clientY);
+    if (idx === pointerKey.get(e.pointerId)) return;
+    keyUp("p" + e.pointerId);
+    if (idx === null) { pointerKey.set(e.pointerId, null); return; }
+    pointerKey.set(e.pointerId, idx);
+    keyDown("p" + e.pointerId, idx);
+  });
+  const release = e => {
+    if (!pointerKey.has(e.pointerId)) return;
+    pointerKey.delete(e.pointerId);
+    keyUp("p" + e.pointerId);
+  };
+  window.addEventListener("pointerup", release);
+  window.addEventListener("pointercancel", release);
+  kb.addEventListener("contextmenu", e => e.preventDefault());
+
+  // ---------- Computer keyboard ----------
+  window.addEventListener("keydown", e => {
+    if (e.target.matches("select, input")) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.code === "ArrowLeft") { e.preventDefault(); setOctave(octave - 1); return; }
+    if (e.code === "ArrowRight") { e.preventDefault(); setOctave(octave + 1); return; }
+    if (e.code === "Escape") { panic(); return; }
+    if (e.repeat) return;
+    if (e.code in KEYMAP) { e.preventDefault(); keyDown("k" + e.code, KEYMAP[e.code]); }
+  });
+  window.addEventListener("keyup", e => { if (e.code in KEYMAP) keyUp("k" + e.code); });
+  window.addEventListener("blur", () => {
+    for (const src of [...held.keys()]) if (src[0] === "k") keyUp(src);
+  });
+
+  // ---------- MIDI input ----------
+  function onMidiMessage(e) {
+    const d = e.data;
+    if (!d || !d.length) return;
+    blink("inLed");
+    const status = d[0];
+
+    if (status < 0xF0) {
+      const type = status & 0xF0;
+      const note = d[1];
+      if (type === 0x90 && d[2] > 0) remoteNotes.add(note);
+      else if (type === 0x80 || (type === 0x90 && d[2] === 0)) remoteNotes.delete(note);
+      if (type === 0x80 || type === 0x90) refreshKeys();
+
+      // Forward channel messages, re-channelled to the selected output channel
+      if (thruEl.checked) {
+        const out = Array.from(d);
+        out[0] = type | channel();
+        send(out);
+      }
+    } else if (thruEl.checked && status !== 0xF0 && status !== 0xFE) {
+      // Forward system real-time / common (clock, start/stop…), skip sysex & active sensing
+      send(Array.from(d));
+    }
+  }
+
+  // ---------- Port management ----------
+  function fillSelect(sel, ports, savedKey) {
+    const current = sel.value || store.get(savedKey, "");
+    sel.length = 1;
+    for (const p of ports.values()) {
+      if (p.state === "disconnected") continue;
+      sel.add(new Option(p.name + (p.manufacturer ? ` (${p.manufacturer})` : ""), p.id));
+    }
+    sel.value = [...sel.options].some(o => o.value === current) ? current : "";
+  }
+
+  function selectOutput() {
+    const id = outSel.value;
+    store.set("out", id);
+    if (output && output.id !== id) panic();
+    output = id ? midi.outputs.get(id) || null : null;
+    if (output && output.open) output.open().catch(() => {});
+    updateStatus();
+  }
+
+  function selectInput() {
+    const id = inSel.value;
+    store.set("in", id);
+    if (input && input.id !== id) {
+      input.onmidimessage = null;
+      remoteNotes.clear();
+      refreshKeys();
+    }
+    input = id ? midi.inputs.get(id) || null : null;
+    if (input) input.onmidimessage = onMidiMessage;
+    updateStatus();
+  }
+
+  function refreshPorts() {
+    fillSelect(outSel, midi.outputs, "out");
+    fillSelect(inSel, midi.inputs, "in");
+    // Auto-pick the only available output if nothing chosen
+    if (!outSel.value && outSel.options.length === 2) outSel.selectedIndex = 1;
+    selectOutput();
+    selectInput();
+  }
+
+  function setStatus(msg, err) {
+    statusEl.textContent = msg;
+    statusEl.classList.toggle("err", !!err);
+  }
+  function updateStatus() {
+    if (!midi) return;
+    const nOut = outSel.options.length - 1, nIn = inSel.options.length - 1;
+    if (!nOut) {
+      setStatus("No MIDI outputs found. Connect your phone/device via USB and set it to MIDI mode (Android: USB settings → MIDI).");
+    } else if (!output) {
+      setStatus(`${nOut} output(s) available — choose one above.`);
+    } else {
+      setStatus(`Sending to “${output.name}” on channel ${channel() + 1}` +
+        (input ? ` · listening to “${input.name}”${thruEl.checked ? " (thru)" : ""}` : ""));
+    }
+  }
+
+  // ---------- Wire up controls ----------
+  outSel.addEventListener("change", selectOutput);
+  inSel.addEventListener("change", selectInput);
+  chSel.addEventListener("change", () => { panic(); store.set("ch", +chSel.value); updateStatus(); });
+  thruEl.addEventListener("change", () => { store.set("thru", thruEl.checked); updateStatus(); });
+  velEl.addEventListener("input", () => { velVal.textContent = velEl.value; store.set("vel", +velEl.value); });
+  $("octDown").addEventListener("click", () => setOctave(octave - 1));
+  $("octUp").addEventListener("click", () => setOctave(octave + 1));
+  $("panic").addEventListener("click", panic);
+  // Keep buttons from stealing keyboard focus (so arrow keys keep working)
+  document.querySelectorAll("button").forEach(b => b.addEventListener("mousedown", e => e.preventDefault()));
+
+  velVal.textContent = velEl.value;
+  setOctave(octave);
+
+  // ---------- Init ----------
+  if (!navigator.requestMIDIAccess) {
+    setStatus("This browser does not support Web MIDI. Use Chrome, Edge, Opera or Firefox (iOS/Safari is not supported).", true);
+    return;
+  }
+  if (!window.isSecureContext) {
+    setStatus("Web MIDI needs HTTPS (or localhost). Open this page via GitHub Pages or a local server.", true);
+    return;
+  }
+  navigator.requestMIDIAccess({ sysex: false }).then(access => {
+    midi = access;
+    midi.onstatechange = refreshPorts;
+    refreshPorts();
+  }, err => {
+    setStatus("MIDI access denied: " + (err && err.message || err), true);
+  });
+})();
+</script>
+</body>
+</html>
